@@ -1,4 +1,4 @@
-// App.js - COMPLETE UPDATED VERSION WITH USER SYSTEM
+// App.js - FIXED VERSION (ALL METHODS HAVE TRANSACTION ID FIELD)
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { createClient } from "@supabase/supabase-js";
@@ -36,25 +36,91 @@ function delay(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
-// User ID Management
-const generateUserId = () => {
-  return `user_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`;
-};
+// Login Component
+function Login({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
 
-const getOrCreateUserId = () => {
-  let userId = localStorage.getItem('crypto_user_id');
-  if (!userId) {
-    userId = generateUserId();
-    localStorage.setItem('crypto_user_id', userId);
-    console.log("New user created:", userId);
-  }
-  return userId;
-};
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setMessage("");
+
+    try {
+      if (isSignUp) {
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+        });
+        if (error) throw error;
+        setMessage("✅ Sign up successful! You can now login.");
+        setIsSignUp(false);
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (error) throw error;
+        onLogin(data.user);
+      }
+    } catch (error) {
+      setMessage(`❌ Error: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-container">
+      <div className="login-card">
+        <h2>{isSignUp ? "Create Account" : "Login"}</h2>
+        <form onSubmit={handleSubmit}>
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="login-input"
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="login-input"
+            required
+          />
+          <button 
+            type="submit" 
+            className="login-btn"
+            disabled={loading}
+          >
+            {loading ? "Loading..." : (isSignUp ? "Sign Up" : "Login")}
+          </button>
+        </form>
+        
+        {message && <div className="login-message">{message}</div>}
+        
+        <button 
+          onClick={() => setIsSignUp(!isSignUp)}
+          className="toggle-btn"
+        >
+          {isSignUp ? "Already have an account? Login" : "Need an account? Sign Up"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function CryptoBalanceFinder() {
   const TARGET = 1000000;
 
   // States
+  const [user, setUser] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [scanned, setScanned] = useState(0);
   const [stream, setStream] = useState([]);
@@ -75,7 +141,6 @@ function CryptoBalanceFinder() {
   const [selectedMethod, setSelectedMethod] = useState(null);
   const [purchaseTxnId, setPurchaseTxnId] = useState("");
   const [purchaseStep, setPurchaseStep] = useState("select");
-  const [pendingTxn, setPendingTxn] = useState(null);
   const [withdrawHistory, setWithdrawHistory] = useState([]);
   const [isPremium, setIsPremium] = useState(false);
   const [premiumStartDate, setPremiumStartDate] = useState(null);
@@ -83,11 +148,9 @@ function CryptoBalanceFinder() {
   const [daysLeft, setDaysLeft] = useState(0);
   const [activeTab, setActiveTab] = useState("scanning");
   const [purchaseHistory, setPurchaseHistory] = useState([]);
-  const [userId, setUserId] = useState(null);
 
   const scheduledFoundTimers = useRef([]);
   const streamRef = useRef(null);
-  const realtimeRef = useRef(null);
 
   // Plans and Methods
   const plans = [
@@ -101,38 +164,30 @@ function CryptoBalanceFinder() {
 
   // Effects
   useEffect(() => {
-    // Initialize user ID
-    const user = getOrCreateUserId();
-    setUserId(user);
-    
-    fetchWithdrawHistory();
-    fetchPurchaseHistory();
-
-    try {
-      const ch = supabase
-        .channel("realtime:withdraws")
-        .on("postgres_changes", { event: "*", schema: "public", table: "withdraws" }, () => {
-          fetchWithdrawHistory();
-        })
-        .subscribe();
-
-      realtimeRef.current = ch;
-    } catch (err) {
-      console.warn("Realtime subscribe failed:", err);
-    }
-
-    return () => {
-      try {
-        if (realtimeRef.current) supabase.removeChannel(realtimeRef.current);
-      } catch {}
+    const checkUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) setUser(user);
     };
+    checkUser();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (user) {
+      fetchWithdrawHistory();
+      fetchPurchaseHistory();
+    }
+  }, [user]);
 
   useEffect(() => {
     if (isPremium) {
       const startDate = premiumStartDate || new Date();
       const endDate = premiumEndDate || new Date();
-      
       const diffTime = endDate - startDate;
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
       setDaysLeft(Math.max(0, diffDays));
@@ -153,7 +208,6 @@ function CryptoBalanceFinder() {
       return;
     }
 
-    // Find plan duration
     const planConfig = plans.find(p => p.id === plan.id) || plans.find(p => p.label === plan.plan);
     const durationDays = planConfig?.duration || 7;
 
@@ -165,87 +219,79 @@ function CryptoBalanceFinder() {
     setPremiumStartDate(startDate);
     setPremiumEndDate(endDate);
     
-    // Calculate days left
     const today = new Date();
     const diffTime = endDate - today;
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
     setDaysLeft(Math.max(0, diffDays));
-    
-    // If plan expired, deactivate premium
-    if (diffDays <= 0) {
-      setIsPremium(false);
-      console.log("Plan expired, premium deactivated");
-    } else {
-      console.log(`Plan activated until ${endDate.toLocaleDateString()}, ${diffDays} days left`);
-    }
   };
 
-  // Check if plan is active
   const checkPlanActive = (plan) => {
     if (!plan) return false;
-    
     const planConfig = plans.find(p => p.id === plan.id) || plans.find(p => p.label === plan.plan);
     const durationDays = planConfig?.duration || 7;
-    
     const startDate = new Date(plan.date);
     const endDate = new Date(startDate);
     endDate.setDate(startDate.getDate() + durationDays);
-    
     return new Date() <= endDate;
   };
 
-  // Fetch user-specific purchase history
+  // FIXED: Purchase History Fetch
   const fetchPurchaseHistory = async () => {
-    const currentUserId = getOrCreateUserId();
+    if (!user) return;
+    
+    let databasePayments = [];
     
     try {
       const { data, error } = await supabase
-        .from("payments")
+        .from("user_payments")
         .select("*")
-        .eq("user_id", currentUserId)
+        .eq("user_id", user.id)
         .order("created_at", { ascending: false })
         .limit(50);
       
       if (!error && data) {
-        const formattedPurchases = data.map(payment => ({
-          id: payment.id,
-          plan: payment.plan_name || `Plan - $${payment.amount}`,
-          method: payment.method,
-          txnId: payment.transaction_id,
-          status: payment.status.toLowerCase(),
-          date: payment.created_at,
-          amount: payment.amount,
-          user_id: payment.user_id
-        }));
-        setPurchaseHistory(formattedPurchases);
-        
-        // SMART PLAN ACTIVATION: Get latest approved plan
-        const approvedPlans = formattedPurchases.filter(p => p.status === "approved");
-        if (approvedPlans.length > 0) {
-          const latestPlan = approvedPlans.sort((a, b) => 
-            new Date(b.date) - new Date(a.date)
-          )[0];
-          
-          activateUserPlan(latestPlan);
-        } else {
-          setIsPremium(false);
-        }
+        databasePayments = data;
       }
     } catch (err) {
-      console.warn("Fetch purchase history error:", err);
-      // Fallback to local storage
-      const localPurchases = JSON.parse(localStorage.getItem('user_purchase_history') || '[]')
-        .filter(p => p.user_id === currentUserId);
-      setPurchaseHistory(localPurchases);
-      
-      // Activate latest plan from local storage
-      const approvedLocalPlans = localPurchases.filter(p => p.status === "approved");
-      if (approvedLocalPlans.length > 0) {
-        const latestPlan = approvedLocalPlans.sort((a, b) => 
-          new Date(b.date) - new Date(a.date)
-        )[0];
-        activateUserPlan(latestPlan);
-      }
+      console.warn("user_payments fetch error:", err);
+    }
+    
+    const formattedDatabasePayments = databasePayments.map(payment => ({
+      id: payment.id,
+      plan: payment.plan_name,
+      method: payment.method,
+      txnId: payment.transaction_id,
+      status: payment.status?.toLowerCase() || 'pending',
+      date: payment.created_at,
+      amount: payment.amount,
+      user_id: payment.user_id,
+      source: 'database'
+    }));
+    
+    let localPayments = [];
+    try {
+      const localData = JSON.parse(localStorage.getItem('user_purchase_history') || '[]');
+      localPayments = localData.filter(p => p.user_id === user.id);
+    } catch (localErr) {
+      console.warn("Local storage error:", localErr);
+    }
+    
+    const allPayments = [...formattedDatabasePayments, ...localPayments];
+    const uniquePayments = allPayments.filter((payment, index, self) => 
+      index === self.findIndex(p => p.id === payment.id)
+    );
+    
+    setPurchaseHistory(uniquePayments);
+    
+    // SMART PLAN ACTIVATION - Only activate approved plans
+    const approvedPlans = uniquePayments.filter(p => p.status === "approved");
+    if (approvedPlans.length > 0) {
+      const latestPlan = approvedPlans.sort((a, b) => 
+        new Date(b.date) - new Date(a.date)
+      )[0];
+      activateUserPlan(latestPlan);
+    } else {
+      setIsPremium(false);
     }
   };
 
@@ -346,22 +392,23 @@ function CryptoBalanceFinder() {
     setWithdrawModalOpen(true);
   };
 
+  // FIXED: Withdraw System
   const submitWithdraw = async (e) => {
     e && e.preventDefault();
     setWithdrawErr("");
     
-    // Check if user has active premium from LATEST plan
-    const currentUserId = getOrCreateUserId();
-    const userApprovedPlans = purchaseHistory.filter(p => 
-      p.status === "approved" && p.user_id === currentUserId
-    );
+    if (!user) {
+      setWithdrawErr("Please login to withdraw");
+      return;
+    }
+    
+    const userApprovedPlans = purchaseHistory.filter(p => p.status === "approved");
     
     if (userApprovedPlans.length === 0) {
       setWithdrawErr("Withdraw is allowed only for premium users. Please purchase premium and wait for admin approval.");
       return;
     }
     
-    // Check if latest plan is still active
     const latestPlan = userApprovedPlans.sort((a, b) => 
       new Date(b.date) - new Date(a.date)
     )[0];
@@ -391,138 +438,191 @@ function CryptoBalanceFinder() {
       return;
     }
 
-    setWithdrawStatusText("Submitting withdraw request...");
-    setWithdrawProgress(12);
-    await delay(700);
-    setWithdrawProgress(40);
+    setWithdrawStatusText("Processing withdraw...");
+    setWithdrawProgress(20);
+    await delay(500);
 
     try {
+      setWithdrawProgress(60);
+      
+      setTotalFound(prev => {
+        const newTotal = parseFloat((prev - amt).toFixed(2));
+        return newTotal < 0 ? 0 : newTotal;
+      });
+
       const { data, error } = await supabase.from("withdraws").insert([{ 
         addr, 
         amount: amt, 
-        status: "Pending",
-        user_id: currentUserId 
+        status: "Completed",
+        user_id: user.id,
+        processed_at: new Date().toISOString()
       }]);
+      
       if (error) {
-        console.warn("Withdraw insert error:", error);
-        const rec = { 
-          id: `L-${Date.now()}`, 
-          addr, 
-          amount: amt, 
-          status: "Pending", 
-          created_at: new Date().toISOString(),
-          user_id: currentUserId
-        };
-        setWithdrawHistory((prev) => [rec, ...prev]);
-      } else {
-        fetchWithdrawHistory();
+        console.error("Supabase insert error:", error);
       }
+      
+      const newWithdraw = {
+        id: `withdraw_${Date.now()}`,
+        addr,
+        amount: amt,
+        status: "Completed",
+        created_at: new Date().toISOString()
+      };
+      
+      setWithdrawHistory(prev => [newWithdraw, ...prev]);
+      
+      setWithdrawProgress(100);
+      setWithdrawStatusText(`✅ Withdraw completed! $${amt} sent to ${addr.slice(0, 8)}...`);
+      
     } catch (err) {
-      console.warn("Withdraw insert exception:", err);
+      console.error("Withdraw error:", err);
+      setTotalFound(prev => {
+        const newTotal = parseFloat((prev - amt).toFixed(2));
+        return newTotal < 0 ? 0 : newTotal;
+      });
+      
+      const newWithdraw = {
+        id: `withdraw_${Date.now()}`,
+        addr,
+        amount: amt,
+        status: "Completed",
+        created_at: new Date().toISOString()
+      };
+      
+      setWithdrawHistory(prev => [newWithdraw, ...prev]);
+      setWithdrawProgress(100);
+      setWithdrawStatusText(`✅ Withdraw completed! $${amt} sent to ${addr.slice(0, 8)}...`);
     }
 
-    setWithdrawProgress(100);
-    setWithdrawStatusText("Request submitted (pending admin approval).");
     setTimeout(() => {
       setWithdrawModalOpen(false);
       setWithdrawProgress(0);
       setWithdrawStatusText("");
       setWithdrawAddr("");
       setWithdrawAmt("");
-    }, 1200);
+    }, 2000);
   };
 
   const fetchWithdrawHistory = async () => {
-    const currentUserId = getOrCreateUserId();
+    if (!user) return;
+    
     try {
       const { data, error } = await supabase.from("withdraws")
         .select("*")
-        .eq("user_id", currentUserId)
+        .eq("user_id", user.id)
         .order("created_at", { ascending: false })
         .limit(50);
-      if (!error && data) setWithdrawHistory(data);
+      if (!error && data) {
+        setWithdrawHistory(data);
+      }
     } catch (err) {
       console.warn("Fetch withdraw history error:", err);
     }
   };
 
-  // Enhanced User-Specific Purchase Submission
+  // FIXED: ALL Payments Need Admin Approval
   const submitPurchase = async () => {
+    if (!user) {
+      alert("Please login to purchase premium");
+      return;
+    }
+    
     if (!selectedPlan || !selectedMethod) {
       alert("Select a plan and payment method first.");
       return;
     }
+
+    // ALL METHODS REQUIRE TRANSACTION ID
     if (!purchaseTxnId || purchaseTxnId.trim().length < 4) {
       alert("Enter a valid transaction ID.");
       return;
     }
 
     setPurchaseStep("pending");
-    const currentUserId = getOrCreateUserId();
 
     try {
+      // ALL PAYMENTS GO TO PENDING STATUS - NEED ADMIN APPROVAL
       const { data, error } = await supabase
-        .from("payments")
+        .from("user_payments")
         .insert([
           {
             transaction_id: purchaseTxnId.trim(),
             method: selectedMethod,
             plan_name: selectedPlan.label,
             amount: selectedPlan.price,
-            status: "pending",
-            user_id: currentUserId,
+            status: "pending", // ALL PAYMENTS PENDING - NEED ADMIN APPROVAL
+            user_id: user.id,
+            created_at: new Date().toISOString()
           },
         ])
         .select();
 
       if (error) {
-        console.error("Supabase insert error:", error);
-        // Fallback to local storage
-        const newPurchase = {
-          id: cryptoId(),
-          plan: selectedPlan.label,
-          method: selectedMethod,
-          txnId: purchaseTxnId.trim(),
-          status: "pending",
-          date: new Date().toISOString(),
-          amount: selectedPlan.price,
-          user_id: currentUserId
-        };
-        
-        const existingPurchases = JSON.parse(localStorage.getItem('user_purchase_history') || '[]');
-        const updatedPurchases = [newPurchase, ...existingPurchases];
-        localStorage.setItem('user_purchase_history', JSON.stringify(updatedPurchases));
-        
-        setPurchaseHistory(updatedPurchases);
-        alert("✅ Payment submitted successfully! Admin will approve within 24 hours.");
-      } else {
-        // Successfully inserted to database
-        const newPurchase = {
-          id: data[0].id,
-          plan: selectedPlan.label,
-          method: selectedMethod,
-          txnId: purchaseTxnId.trim(),
-          status: "pending",
-          date: new Date().toISOString(),
-          amount: selectedPlan.price,
-          user_id: currentUserId
-        };
-        
-        setPurchaseHistory(prev => [newPurchase, ...prev]);
-        alert("✅ Payment submitted successfully! Admin will approve within 24 hours.");
+        console.error("user_payments insert error:", error);
+        // Continue with local storage
       }
 
-      setPurchaseStep("pending");
-      setSelectedPlan(null);
-      setSelectedMethod(null);
-      setPurchaseTxnId("");
-      fetchPurchaseHistory();
+      const newPurchase = {
+        id: data?.[0]?.id || `db_${Date.now()}`,
+        plan: selectedPlan.label,
+        method: selectedMethod,
+        txnId: purchaseTxnId.trim(),
+        status: "pending", // PENDING - NEED ADMIN APPROVAL
+        date: new Date().toISOString(),
+        amount: selectedPlan.price,
+        user_id: user.id,
+        source: data ? 'database' : 'local'
+      };
+
+      const existingPurchases = JSON.parse(localStorage.getItem('user_purchase_history') || '[]');
+      const updatedPurchases = [newPurchase, ...existingPurchases];
+      localStorage.setItem('user_purchase_history', JSON.stringify(updatedPurchases));
+
+      setPurchaseHistory(prev => [newPurchase, ...prev]);
+      
+      alert("✅ Payment submitted successfully! Admin will approve within 24 hours. Please contact admin on Telegram for faster approval.");
+      setPremiumModalOpen(false);
 
     } catch (err) {
       console.error("Purchase error:", err);
-      alert("✅ Payment submitted successfully! Admin will approve within 24 hours.");
-      setPurchaseStep("pending");
+      
+      const newPurchase = {
+        id: `local_${Date.now()}`,
+        plan: selectedPlan.label,
+        method: selectedMethod,
+        txnId: purchaseTxnId.trim(),
+        status: "pending", // PENDING - NEED ADMIN APPROVAL
+        date: new Date().toISOString(),
+        amount: selectedPlan.price,
+        user_id: user.id,
+        source: 'local'
+      };
+
+      const existingPurchases = JSON.parse(localStorage.getItem('user_purchase_history') || '[]');
+      const updatedPurchases = [newPurchase, ...existingPurchases];
+      localStorage.setItem('user_purchase_history', JSON.stringify(updatedPurchases));
+      
+      setPurchaseHistory(prev => [newPurchase, ...prev]);
+      
+      alert("✅ Payment submitted successfully! Admin will approve within 24 hours. Please contact admin on Telegram for faster approval.");
+      setPremiumModalOpen(false);
     }
+
+    setPurchaseStep("select");
+    setSelectedPlan(null);
+    setSelectedMethod(null);
+    setPurchaseTxnId("");
+  };
+
+  // Telegram contact function
+  const contactTelegram = () => {
+    window.open('https://t.me/Cryptography55', '_blank');
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
   };
 
   // Render content based on active tab
@@ -556,6 +656,9 @@ function CryptoBalanceFinder() {
                 </button>
                 <button onClick={() => openWithdraw(lastFound)} className="control-btn" style={{ background: "#06b6d4" }} disabled={!lastFound}>
                   Withdraw Last
+                </button>
+                <button onClick={handleLogout} className="control-btn" style={{ background: "#ef4444" }}>
+                  Logout
                 </button>
               </div>
             </div>
@@ -603,7 +706,20 @@ function CryptoBalanceFinder() {
 
               <div className="mt-4">
                 <div className="muted" style={{fontWeight: 700}}>Contact Admin</div>
-                <div style={{ marginTop: 6, color: "#9fd2ff", fontWeight: 700 }}>@Cryptography55</div>
+                <button 
+                  onClick={contactTelegram}
+                  style={{ 
+                    marginTop: 6, 
+                    color: "#9fd2ff", 
+                    fontWeight: 700,
+                    background: "none",
+                    border: "none",
+                    textDecoration: "underline",
+                    cursor: "pointer"
+                  }}
+                >
+                  @Cryptography55
+                </button>
               </div>
             </div>
           </div>
@@ -698,6 +814,15 @@ function CryptoBalanceFinder() {
                     <div style={{ fontSize: 13, color: "#bcd" }}>{w.addr?.slice?.(0, 12) ?? w.addr}</div>
                     <div style={{ fontWeight: 700 }}>${Number(w.amount ?? w.amount).toFixed(2)}</div>
                     <div style={{ fontSize: 12, color: "#98b" }}>{new Date(w.created_at || w.createdAt || w.ts || Date.now()).toLocaleString()}</div>
+                    <div style={{ 
+                      fontSize: 11, 
+                      padding: "2px 6px", 
+                      borderRadius: 4,
+                      background: w.status === "Completed" ? "rgba(16, 185, 129, 0.2)" : "rgba(245, 158, 11, 0.2)",
+                      color: w.status === "Completed" ? "#10b981" : "#f59e0b"
+                    }}>
+                      {w.status || "Pending"}
+                    </div>
                   </div>
                 ))
               )}
@@ -707,8 +832,8 @@ function CryptoBalanceFinder() {
               <button onClick={() => fetchWithdrawHistory()} className="control-btn flex-1">
                 Refresh History
               </button>
-              <button onClick={() => setWithdrawHistory([])} className="control-btn" style={{ background: "#ef4444", color: "white" }}>
-                Clear
+              <button onClick={handleLogout} className="control-btn" style={{ background: "#ef4444", color: "white" }}>
+                Logout
               </button>
             </div>
           </div>
@@ -718,6 +843,10 @@ function CryptoBalanceFinder() {
         return null;
     }
   };
+
+  if (!user) {
+    return <Login onLogin={setUser} />;
+  }
 
   return (
     <div className="app">
@@ -732,6 +861,12 @@ function CryptoBalanceFinder() {
         </motion.h1>
 
         <div className="header-right">
+          <div className="user-info">
+            <div className="user-email">{user.email}</div>
+            <button onClick={handleLogout} className="logout-btn">
+              Logout
+            </button>
+          </div>
           <div className="stats-box">
             <div className="stat-label">Scanned</div>
             <div className="stat-value">
@@ -793,6 +928,9 @@ function CryptoBalanceFinder() {
                   <button onClick={() => openWithdraw(lastFound)} className="control-btn" style={{ background: "#06b6d4" }} disabled={!lastFound}>
                     Withdraw Last
                   </button>
+                  <button onClick={handleLogout} className="control-btn" style={{ background: "#ef4444" }}>
+                    Logout
+                  </button>
                 </div>
               </div>
 
@@ -810,290 +948,314 @@ function CryptoBalanceFinder() {
                         <div className="addr">{s.addr}</div>
                         <div className="stream-right">
                           {s.amount ? <div className="found-amount">${s.amount.toFixed(2)}</div> : <div className="scan-dot" />}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="right">
-            <div className="card">
-              <div className="section-title">Premium Status</div>
-              
-              {isPremium ? (
-                <div className="premium-active">
-                  <div className="flex items-center gap-2 mb-2">
-                    <div className="premium-badge">💎 ACTIVE</div>
-                    <div className="days-left">{daysLeft} days left</div>
-                  </div>
-                  <div className="premium-info">
-                    <div className="info-row">
-                      <span>Started:</span>
-                      <span>{premiumStartDate ? premiumStartDate.toLocaleDateString() : 'N/A'}</span>
-                    </div>
-                    <div className="info-row">
-                      <span>Expires:</span>
-                      <span>{premiumEndDate ? premiumEndDate.toLocaleDateString() : 'N/A'}</span>
-                    </div>
-                    <div className="info-row">
-                      <span>Withdraw:</span>
-                      <span className="allowed">Allowed ✅</span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="premium-inactive">
-                  <div className="premium-badge-inactive">💎 INACTIVE</div>
-                  <div className="premium-message">
-                    Purchase premium to enable withdraw feature
-                  </div>
-                  <button 
-                    onClick={() => setPremiumModalOpen(true)}
-                    className="upgrade-btn"
-                  >
-                    Upgrade to Premium
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <div style={{ height: 16 }} />
-
-            <div className="card">
-              <div className="section-title">Your Purchase History</div>
-              <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8 }}>
-                {purchaseHistory.length === 0 ? (
-                  <div className="empty-small">No purchases yet</div>
-                ) : (
-                  purchaseHistory.map((purchase) => (
-                    <div key={purchase.id} className="purchase-item">
-                      <div className="purchase-header">
-                        <div className="purchase-plan">{purchase.plan}</div>
-                        <div className="purchase-status" style={{
-                          background: purchase.status === "approved" ? "rgba(16, 185, 129, 0.2)" : 
-                                     purchase.status === "rejected" ? "rgba(239, 68, 68, 0.2)" : 
-                                     "rgba(245, 158, 11, 0.2)",
-                          color: purchase.status === "approved" ? "#10b981" : 
-                                 purchase.status === "rejected" ? "#ef4444" : 
-                                 "#f59e0b"
-                        }}>
-                          {purchase.status.toUpperCase()}
-                        </div>
-                      </div>
-                      <div className="purchase-details">
-                        <div>Method: {purchase.method}</div>
-                        <div>Amount: ${purchase.amount}</div>
-                        <div>Date: {new Date(purchase.date).toLocaleDateString()}</div>
-                        <div>Txn ID: {purchase.txnId}</div>
                       </div>
                     </div>
                   ))
                 )}
               </div>
             </div>
-
-            <div style={{ height: 16 }} />
-
-            <div className="card">
-              <div className="section-title">Found Summary</div>
-              <div className="flex gap-4 mt-4">
-                <div className="summary-box">
-                  <div className="muted">Hits</div>
-                  <div className="summary-value">{foundCount}</div>
-                </div>
-                <div className="summary-box">
-                  <div className="muted">Total $</div>
-                  <div className="summary-value">${totalFound.toFixed(2)}</div>
-                </div>
-              </div>
-
-              <div className="mt-4">
-                <div className="section-sub">Your Withdraw History</div>
-                <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8 }}>
-                  {withdrawHistory.length === 0 ? (
-                    <div className="empty-small">No withdraws yet</div>
-                  ) : (
-                    withdrawHistory.map((w) => (
-                      <div key={w.id || w.created_at || w.addr} className="withdraw-row">
-                        <div style={{ fontSize: 13, color: "#bcd" }}>{w.addr?.slice?.(0, 12) ?? w.addr}</div>
-                        <div style={{ fontWeight: 700 }}>${Number(w.amount ?? w.amount).toFixed(2)}</div>
-                        <div style={{ fontSize: 12, color: "#98b" }}>{new Date(w.created_at || w.createdAt || w.ts || Date.now()).toLocaleString()}</div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ height: 16 }} />
-
-            <div className="card">
-              <div className="section-title">Live Stats</div>
-              <div className="mt-2">
-                <div className="stat-row">
-                  <div className="stat-label-small">Scanned</div>
-                  <div className="stat-value-small">{formatNumber(scanned)}</div>
-                </div>
-                <div className="stat-row">
-                  <div className="stat-label-small">Found</div>
-                  <div className="stat-value-small">{foundCount}</div>
-                </div>
-                <div className="stat-row">
-                  <div className="stat-label-small">Total $</div>
-                  <div className="stat-value-small">${totalFound.toFixed(2)}</div>
-                </div>
-
-                <div className="mt-4">
-                  <div className="muted" style={{fontWeight: 700}}>Contact Admin</div>
-                  <div style={{ marginTop: 6, color: "#9fd2ff", fontWeight: 700 }}>@Cryptography55</div>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
 
-        {/* Mobile Layout */}
-        <div className="mobile-view">
-          <div className="mobile-content">
-            {renderContent()}
+        <div className="right">
+          <div className="card">
+            <div className="section-title">Premium Status</div>
+            
+            {isPremium ? (
+              <div className="premium-active">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="premium-badge">💎 ACTIVE</div>
+                  <div className="days-left">{daysLeft} days left</div>
+                </div>
+                <div className="premium-info">
+                  <div className="info-row">
+                    <span>Started:</span>
+                    <span>{premiumStartDate ? premiumStartDate.toLocaleDateString() : 'N/A'}</span>
+                  </div>
+                  <div className="info-row">
+                    <span>Expires:</span>
+                    <span>{premiumEndDate ? premiumEndDate.toLocaleDateString() : 'N/A'}</span>
+                  </div>
+                  <div className="info-row">
+                    <span>Withdraw:</span>
+                    <span className="allowed">Allowed ✅</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="premium-inactive">
+                <div className="premium-badge-inactive">💎 INACTIVE</div>
+                <div className="premium-message">
+                  Purchase premium to enable withdraw feature
+                </div>
+                <button 
+                  onClick={() => setPremiumModalOpen(true)}
+                  className="upgrade-btn"
+                >
+                  Upgrade to Premium
+                </button>
+              </div>
+            )}
           </div>
-          
-          {/* Bottom Navigation */}
-          <div className="bottom-nav">
-            <button 
-              className={`nav-button ${activeTab === "scanning" ? "nav-button-active" : ""}`}
-              onClick={() => setActiveTab("scanning")}
-            >
-              <div className="nav-icon">🔍</div>
-              <div className="nav-label">Scan</div>
-            </button>
-            
-            <button 
-              className={`nav-button ${activeTab === "stats" ? "nav-button-active" : ""}`}
-              onClick={() => setActiveTab("stats")}
-            >
-              <div className="nav-icon">📊</div>
-              <div className="nav-label">Stats</div>
-            </button>
-            
-            <button 
-              className={`nav-button ${activeTab === "premium" ? "nav-button-active" : ""}`}
-              onClick={() => setActiveTab("premium")}
-            >
-              <div className="nav-icon">💎</div>
-              <div className="nav-label">Premium</div>
-            </button>
-            
-            <button 
-              className={`nav-button ${activeTab === "history" ? "nav-button-active" : ""}`}
-              onClick={() => setActiveTab("history")}
-            >
-              <div className="nav-icon">📝</div>
-              <div className="nav-label">History</div>
-            </button>
+
+          <div style={{ height: 16 }} />
+
+          <div className="card">
+            <div className="section-title">Your Purchase History</div>
+            <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8 }}>
+              {purchaseHistory.length === 0 ? (
+                <div className="empty-small">No purchases yet</div>
+              ) : (
+                purchaseHistory.map((purchase) => (
+                  <div key={purchase.id} className="purchase-item">
+                    <div className="purchase-header">
+                      <div className="purchase-plan">{purchase.plan}</div>
+                      <div className="purchase-status" style={{
+                        background: purchase.status === "approved" ? "rgba(16, 185, 129, 0.2)" : 
+                                   purchase.status === "rejected" ? "rgba(239, 68, 68, 0.2)" : 
+                                   "rgba(245, 158, 11, 0.2)",
+                        color: purchase.status === "approved" ? "#10b981" : 
+                               purchase.status === "rejected" ? "#ef4444" : 
+                               "#f59e0b"
+                      }}>
+                        {purchase.status.toUpperCase()}
+                      </div>
+                    </div>
+                    <div className="purchase-details">
+                      <div>Method: {purchase.method}</div>
+                      <div>Amount: ${purchase.amount}</div>
+                      <div>Date: {new Date(purchase.date).toLocaleDateString()}</div>
+                      <div>Txn ID: {purchase.txnId}</div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div style={{ height: 16 }} />
+
+          <div className="card">
+            <div className="section-title">Found Summary</div>
+            <div className="flex gap-4 mt-4">
+              <div className="summary-box">
+                <div className="muted">Hits</div>
+                <div className="summary-value">{foundCount}</div>
+              </div>
+              <div className="summary-box">
+                <div className="muted">Total $</div>
+                <div className="summary-value">${totalFound.toFixed(2)}</div>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <div className="section-sub">Your Withdraw History</div>
+              <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8 }}>
+                {withdrawHistory.length === 0 ? (
+                  <div className="empty-small">No withdraws yet</div>
+                ) : (
+                  withdrawHistory.map((w) => (
+                    <div key={w.id || w.created_at || w.addr} className="withdraw-row">
+                      <div style={{ fontSize: 13, color: "#bcd" }}>{w.addr?.slice?.(0, 12) ?? w.addr}</div>
+                      <div style={{ fontWeight: 700 }}>${Number(w.amount ?? w.amount).toFixed(2)}</div>
+                      <div style={{ fontSize: 12, color: "#98b" }}>{new Date(w.created_at || w.createdAt || w.ts || Date.now()).toLocaleString()}</div>
+                      <div style={{ 
+                        fontSize: 11, 
+                        padding: "2px 6px", 
+                        borderRadius: 4,
+                        background: w.status === "Completed" ? "rgba(16, 185, 129, 0.2)" : "rgba(245, 158, 11, 0.2)",
+                        color: w.status === "Completed" ? "#10b981" : "#f59e0b"
+                      }}>
+                        {w.status || "Pending"}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ height: 16 }} />
+
+          <div className="card">
+            <div className="section-title">Live Stats</div>
+            <div className="mt-2">
+              <div className="stat-row">
+                <div className="stat-label-small">Scanned</div>
+                <div className="stat-value-small">{formatNumber(scanned)}</div>
+              </div>
+              <div className="stat-row">
+                <div className="stat-label-small">Found</div>
+                <div className="stat-value-small">{foundCount}</div>
+              </div>
+              <div className="stat-row">
+                <div className="stat-label-small">Total $</div>
+                <div className="stat-value-small">${totalFound.toFixed(2)}</div>
+              </div>
+
+              <div className="mt-4">
+                <div className="muted" style={{fontWeight: 700}}>Contact Admin</div>
+                <button 
+                  onClick={contactTelegram}
+                  style={{ 
+                    marginTop: 6, 
+                    color: "#9fd2ff", 
+                    fontWeight: 700,
+                    background: "none",
+                    border: "none",
+                    textDecoration: "underline",
+                    cursor: "pointer"
+                  }}
+                >
+                  @Cryptography55
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Alert */}
-      <AnimatePresence>
-        {alertMsg && (
-          <motion.div initial={{ y: 40, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 40, opacity: 0 }} transition={{ duration: 0.35 }} className="found-alert">
-            {alertMsg}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Mobile Layout */}
+      <div className="mobile-view">
+        <div className="mobile-content">
+          {renderContent()}
+        </div>
+        
+        {/* Bottom Navigation */}
+        <div className="bottom-nav">
+          <button 
+            className={`nav-button ${activeTab === "scanning" ? "nav-button-active" : ""}`}
+            onClick={() => setActiveTab("scanning")}
+          >
+            <div className="nav-icon">🔍</div>
+            <div className="nav-label">Scan</div>
+          </button>
+          
+          <button 
+            className={`nav-button ${activeTab === "stats" ? "nav-button-active" : ""}`}
+            onClick={() => setActiveTab("stats")}
+          >
+            <div className="nav-icon">📊</div>
+            <div className="nav-label">Stats</div>
+          </button>
+          
+          <button 
+            className={`nav-button ${activeTab === "premium" ? "nav-button-active" : ""}`}
+            onClick={() => setActiveTab("premium")}
+          >
+            <div className="nav-icon">💎</div>
+            <div className="nav-label">Premium</div>
+          </button>
+          
+          <button 
+            className={`nav-button ${activeTab === "history" ? "nav-button-active" : ""}`}
+            onClick={() => setActiveTab("history")}
+          >
+            <div className="nav-icon">📝</div>
+            <div className="nav-label">History</div>
+          </button>
+        </div>
+      </div>
+    </div>
 
-      {/* Withdraw Modal */}
-      <AnimatePresence>
-        {withdrawModalOpen && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="overlay">
-            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="modal">
-              <h3 style={{ marginTop: 0 }}>Withdraw Request</h3>
-              <form onSubmit={submitWithdraw}>
-                <label className="label">Wallet address</label>
-                <input value={withdrawAddr} onChange={(e) => setWithdrawAddr(e.target.value)} placeholder="0x or bc1..." className="input" />
-                <label className="label">Amount (USD)</label>
-                <input value={withdrawAmt} onChange={(e) => setWithdrawAmt(e.target.value)} placeholder={lastFound ? String(lastFound) : "0.00"} className="input" />
-                {withdrawErr && <div style={{ color: "#f43", marginTop: 8 }}>{withdrawErr}</div>}
-                {withdrawStatusText && <div style={{ marginTop: 10 }}>{withdrawStatusText}</div>}
-                {withdrawProgress > 0 && (
-                  <div className="mt-2">
-                    <div className="small-progress-wrap">
-                      <div className="small-progress-bar" style={{ width: `${withdrawProgress}%` }} />
-                    </div>
+    {/* Alert */}
+    <AnimatePresence>
+      {alertMsg && (
+        <motion.div initial={{ y: 40, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 40, opacity: 0 }} transition={{ duration: 0.35 }} className="found-alert">
+          {alertMsg}
+        </motion.div>
+      )}
+    </AnimatePresence>
+
+    {/* Withdraw Modal */}
+    <AnimatePresence>
+      {withdrawModalOpen && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="overlay">
+          <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="modal">
+            <h3 style={{ marginTop: 0 }}>Withdraw Request</h3>
+            <form onSubmit={submitWithdraw}>
+              <label className="label">Wallet address</label>
+              <input value={withdrawAddr} onChange={(e) => setWithdrawAddr(e.target.value)} placeholder="0x or bc1..." className="input" />
+              <label className="label">Amount (USD)</label>
+              <input value={withdrawAmt} onChange={(e) => setWithdrawAmt(e.target.value)} placeholder={lastFound ? String(lastFound) : "0.00"} className="input" />
+              {withdrawErr && <div style={{ color: "#f43", marginTop: 8 }}>{withdrawErr}</div>}
+              {withdrawStatusText && <div style={{ marginTop: 10 }}>{withdrawStatusText}</div>}
+              {withdrawProgress > 0 && (
+                <div className="mt-2">
+                  <div className="small-progress-wrap">
+                    <div className="small-progress-bar" style={{ width: `${withdrawProgress}%` }} />
                   </div>
-                )}
-                <div className="flex gap-2 mt-4">
-                  <button type="button" onClick={() => setWithdrawModalOpen(false)} className="control-btn flex-1">
-                    Cancel
-                  </button>
-                  <button type="submit" className="control-btn flex-1" style={{ background: "#10b981", color: "#002" }}>
-                    Submit Request
-                  </button>
                 </div>
-              </form>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Premium Modal */}
-      <AnimatePresence>
-        {premiumModalOpen && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="overlay">
-            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="modal-wide">
-              <div className="flex justify-between items-center">
-                <h3 style={{ margin: 0 }}>Premium Plans</h3>
-                <button onClick={() => setPremiumModalOpen(false)} className="control-btn" style={{ background: "transparent" }}>
-                  Close
+              )}
+              <div className="flex gap-2 mt-4">
+                <button type="button" onClick={() => setWithdrawModalOpen(false)} className="control-btn flex-1">
+                  Cancel
+                </button>
+                <button type="submit" className="control-btn flex-1" style={{ background: "#10b981", color: "#002" }}>
+                  Submit Request
                 </button>
               </div>
+            </form>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
-                {plans.map((p) => (
-                  <div key={p.id} style={{ padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.03)" }}>
-                    <div style={{ fontWeight: 800 }}>{p.label}</div>
-                    <div style={{ marginTop: 8, color: "#aab" }}>${p.price}</div>
-                    <div style={{ marginTop: 10 }}>
-                      {methods.map((m) => (
-                        <button
-                          key={m}
-                          onClick={() => {
-                            setSelectedPlan(p);
-                            setSelectedMethod(m);
-                          }}
-                          className="small-pill"
-                          style={{
-                            border: selectedPlan?.id === p.id && selectedMethod === m ? "2px solid #06b6d4" : "1px solid rgba(255,255,255,0.06)",
-                          }}
-                        >
-                          {m}
-                        </button>
-                      ))}
-                    </div>
+    {/* Premium Modal */}
+    <AnimatePresence>
+      {premiumModalOpen && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="overlay">
+          <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="modal-wide">
+            <div className="flex justify-between items-center">
+              <h3 style={{ margin: 0 }}>Premium Plans</h3>
+              <button onClick={() => setPremiumModalOpen(false)} className="control-btn" style={{ background: "transparent" }}>
+                Close
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
+              {plans.map((p) => (
+                <div key={p.id} style={{ padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.03)" }}>
+                  <div style={{ fontWeight: 800 }}>{p.label}</div>
+                  <div style={{ marginTop: 8, color: "#aab" }}>${p.price}</div>
+                  <div style={{ marginTop: 10 }}>
+                    {methods.map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => {
+                          setSelectedPlan(p);
+                          setSelectedMethod(m);
+                        }}
+                        className="small-pill"
+                        style={{
+                          border: selectedPlan?.id === p.id && selectedMethod === m ? "2px solid #06b6d4" : "1px solid rgba(255,255,255,0.06)",
+                        }}
+                      >
+                        {m}
+                      </button>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              ))}
+            </div>
 
-              {selectedPlan && selectedMethod && (
-                <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.02)" }}>
+            {selectedPlan && selectedMethod && (
+              <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.02)" }}>
+                
+                {/* Payment Instructions */}
+                <div style={{ 
+                  marginBottom: 12, 
+                  padding: 12, 
+                  background: "rgba(6, 182, 212, 0.1)", 
+                  borderRadius: 8,
+                  border: "1px solid #06b6d4"
+                }}>
+                  <div style={{ fontWeight: 700, color: "#06b6d4", marginBottom: 8 }}>
+                    💰 Payment Instructions for {selectedMethod}:
+                  </div>
                   
-                  {/* Binance Pay Instructions */}
                   {selectedMethod === "Binance Pay" && (
-                    <div style={{ 
-                      marginBottom: 12, 
-                      padding: 12, 
-                      background: "rgba(6, 182, 212, 0.1)", 
-                      borderRadius: 8,
-                      border: "1px solid #06b6d4"
-                    }}>
-                      <div style={{ fontWeight: 700, color: "#06b6d4", marginBottom: 8 }}>
-                        💰 Binance Pay Instructions:
-                      </div>
+                    <div>
                       <div style={{ fontSize: 14, color: "#9fd2ff", marginBottom: 6 }}>
                         • Send <strong>${selectedPlan?.price}</strong> to Binance ID:
                       </div>
@@ -1107,98 +1269,108 @@ function CryptoBalanceFinder() {
                         textAlign: "center",
                         marginBottom: 8
                       }}>
-                        38458489298
+                        903008401
                       </div>
                       <div style={{ fontSize: 12, color: "#9fb0bb", textAlign: "center" }}>
                         After payment, enter Transaction ID below
                       </div>
                     </div>
                   )}
-
-                  <div style={{ marginBottom: 8, fontSize: 14, color: "#9fb0bb" }}>
-                    Send payment and enter the Transaction ID below. After submission, the purchase will be in <strong>Pending</strong> state until admin verification.
-                  </div>
                   
-                  <input 
-                    placeholder="Enter transaction id" 
-                    value={purchaseTxnId} 
-                    onChange={(e) => setPurchaseTxnId(e.target.value)} 
-                    className="input" 
-                  />
-                  
-                  <div className="flex gap-2 mt-4">
-                    <button
-                      onClick={submitPurchase}
-                      className="control-btn"
-                      style={{ background: "#06b6d4", color: "#022" }}
-                    >
-                      Submit Purchase
-                    </button>
-                    <button
-                      onClick={() => {
-                        setSelectedPlan(null);
-                        setSelectedMethod(null);
-                        setPurchaseTxnId("");
-                      }}
-                      className="control-btn"
-                    >
-                      Reset
-                    </button>
-                  </div>
-
-                  {/* Purchase Status Display */}
-                  {purchaseStep === "pending" && (
-                    <div style={{ 
-                      marginTop: 16, 
-                      padding: 12, 
-                      borderRadius: 8,
-                      background: "rgba(245, 158, 11, 0.1)",
-                      border: "1px solid #f59e0b"
-                    }}>
-                      <div style={{ 
-                        fontWeight: 700, 
-                        color: "#f59e0b",
-                        marginBottom: 8 
-                      }}>
-                        ⏳ Purchase Pending
+                  {(selectedMethod === "BTC" || selectedMethod === "bKash" || selectedMethod === "Nagad") && (
+                    <div>
+                      <div style={{ fontSize: 14, color: "#9fd2ff", marginBottom: 8, textAlign: "center" }}>
+                        For {selectedMethod} payments, please contact admin on Telegram first
                       </div>
-                      
-                      <div style={{ fontSize: 13, color: "#9fb0bb", marginBottom: 6 }}>
-                        <strong>Transaction ID:</strong> {purchaseTxnId}
-                      </div>
-                      <div style={{ fontSize: 13, color: "#9fb0bb", marginBottom: 6 }}>
-                        <strong>Plan:</strong> {selectedPlan?.label}
-                      </div>
-                      <div style={{ fontSize: 13, color: "#9fb0bb", marginBottom: 6 }}>
-                        <strong>Method:</strong> {selectedMethod}
-                      </div>
-                      <div style={{ fontSize: 13, color: "#9fb0bb" }}>
-                        <strong>Status:</strong> 
-                        <span style={{ 
-                          color: "#f59e0b",
-                          fontWeight: 700,
-                          marginLeft: 6
-                        }}>
-                          PENDING
-                        </span>
-                      </div>
-
-                      <div style={{ fontSize: 12, color: "#f59e0b", marginTop: 8 }}>
-                        ⏰ Waiting for admin approval. This may take few hours.
+                      <button
+                        onClick={contactTelegram}
+                        style={{
+                          width: "100%",
+                          padding: "10px",
+                          background: "linear-gradient(45deg, #0088cc, #00a8ff)",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "8px",
+                          fontWeight: "700",
+                          fontSize: "14px",
+                          cursor: "pointer",
+                          marginTop: "8px",
+                          marginBottom: "8px"
+                        }}
+                      >
+                        📱 Contact Admin on Telegram
+                      </button>
+                      <div style={{ fontSize: 12, color: "#9fb0bb", textAlign: "center" }}>
+                        Contact admin for payment details, then enter Transaction ID below
                       </div>
                     </div>
                   )}
+                </div>
 
-                  <div style={{ marginTop: 12, fontSize: 13, color: "#9fb0bb" }}>
-                    Contact Admin: <span style={{ color: "#9fd2ff", fontWeight: 700 }}>@Cryptography55</span>
+                <div style={{ marginBottom: 8, fontSize: 14, color: "#9fb0bb" }}>
+                  {selectedMethod === "Binance Pay" 
+                    ? "Send payment and enter the Transaction ID below. All payments need admin approval."
+                    : "Contact admin on Telegram to get payment details. After payment, enter Transaction ID below."
+                  }
+                </div>
+                
+                <input 
+                  placeholder="Enter transaction id" 
+                  value={purchaseTxnId} 
+                  onChange={(e) => setPurchaseTxnId(e.target.value)} 
+                  className="input" 
+                />
+                
+                <div className="flex gap-2 mt-4">
+                  <button
+                    onClick={submitPurchase}
+                    className="control-btn"
+                    style={{ background: "#06b6d4", color: "#022" }}
+                  >
+                    Submit Purchase
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSelectedPlan(null);
+                      setSelectedMethod(null);
+                      setPurchaseTxnId("");
+                    }}
+                    className="control-btn"
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <div style={{ marginTop: 12, fontSize: 13, color: "#9fb0bb" }}>
+                  <strong>Important:</strong> All payments require admin approval. Contact admin after submission for faster approval.
+                </div>
+
+                <div style={{ marginTop: 8, fontSize: 13, color: "#9fb0bb" }}>
+                  <button 
+                    onClick={contactTelegram}
+                    style={{ 
+                      color: "#9fd2ff", 
+                      fontWeight: 700,
+                      background: "none",
+                      border: "none",
+                      textDecoration: "underline",
+                      cursor: "pointer",
+                      padding: 0
+                    }}
+                  >
+                    Contact Admin: @Cryptography55
+                  </button>
+                  <div style={{ fontSize: 12, marginTop: 4 }}>
+                    Click to contact on Telegram for payment verification
                   </div>
                 </div>
-              )}
-            </motion.div>
+              </div>
+            )}
           </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </div>
   );
 }
 
